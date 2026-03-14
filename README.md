@@ -7,21 +7,23 @@
 - Bash 3.2+
 - `jq`
 - `curl`
+- `git` (for installer)
 
 ## Install
 
-Clone the repo and run `./shia` from the project directory.
+Quick install:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/FrancoAA/shia/main/install.sh | bash
+```
+
+Manual install from source:
 
 ```bash
 git clone git@github.com:FrancoAA/shia.git
 cd shia
+./install.sh
 ./shia --help
-```
-
-Optional: put the script on your `PATH`.
-
-```bash
-ln -sf "$(pwd)/shia" /usr/local/bin/shia
 ```
 
 ## First-time setup
