@@ -45,70 +45,161 @@ chmod +x "${INSTALL_DIR}/shia"
 
 echo "Installed to ${INSTALL_DIR}/shia"
 
-if [[ ":$PATH:" == *":${INSTALL_DIR}:"* ]]; then
-    echo
-    echo "shia is ready! Run 'shia init' to configure your API provider."
-    exit 0
-fi
+# --- PATH setup ---
 
-detect_rc_file() {
-    local shell_name
-    shell_name=$(basename "${SHELL:-/bin/bash}")
+NEEDS_SOURCE=""
 
-    case "$shell_name" in
-        zsh)
-            echo "${HOME}/.zshrc"
-            ;;
-        bash)
-            if [[ "$(uname -s)" == "Darwin" ]]; then
-                if [[ -f "${HOME}/.bash_profile" ]]; then
-                    echo "${HOME}/.bash_profile"
+if [[ ! ":$PATH:" == *":${INSTALL_DIR}:"* ]]; then
+    detect_rc_file() {
+        local shell_name
+        shell_name=$(basename "${SHELL:-/bin/bash}")
+
+        case "$shell_name" in
+            zsh)
+                echo "${HOME}/.zshrc"
+                ;;
+            bash)
+                if [[ "$(uname -s)" == "Darwin" ]]; then
+                    if [[ -f "${HOME}/.bash_profile" ]]; then
+                        echo "${HOME}/.bash_profile"
+                    else
+                        echo "${HOME}/.bashrc"
+                    fi
                 else
                     echo "${HOME}/.bashrc"
                 fi
-            else
-                echo "${HOME}/.bashrc"
-            fi
-            ;;
-        *)
-            echo "${HOME}/.profile"
-            ;;
-    esac
+                ;;
+            *)
+                echo "${HOME}/.profile"
+                ;;
+        esac
+    }
+
+    RC_FILE=$(detect_rc_file)
+    PATH_LINE='export PATH="${HOME}/.local/bin:${PATH}"'
+
+    echo
+    echo "${INSTALL_DIR} is not in your PATH."
+
+    if [[ -f "$RC_FILE" ]] && grep -Fq "$PATH_LINE" "$RC_FILE"; then
+        echo "PATH export already exists in ${RC_FILE}."
+        NEEDS_SOURCE="$RC_FILE"
+    elif [[ -t 0 ]]; then
+        read -rp "Add it to ${RC_FILE}? [Y/n]: " add_to_path
+        add_to_path="${add_to_path:-Y}"
+
+        if [[ "$add_to_path" =~ ^[Yy]$ ]]; then
+            {
+                echo
+                echo "# Added by shia installer"
+                echo "$PATH_LINE"
+            } >> "$RC_FILE"
+            echo "Added to ${RC_FILE}"
+            NEEDS_SOURCE="$RC_FILE"
+        else
+            echo
+            echo "Add this to your shell config manually:"
+            echo '  export PATH="${HOME}/.local/bin:${PATH}"'
+        fi
+    else
+        echo
+        echo "Add this to your shell config manually:"
+        echo '  export PATH="${HOME}/.local/bin:${PATH}"'
+    fi
+fi
+
+# --- LLM provider setup ---
+
+SHIA_CONFIG_DIR="${XDG_CONFIG_HOME:-${HOME}/.config}/shia"
+
+setup_provider() {
+    echo
+    echo -e "\033[1mLLM provider setup\033[0m"
+    echo
+
+    if [[ -d "$SHIA_CONFIG_DIR" ]]; then
+        echo "Existing configuration found at ${SHIA_CONFIG_DIR}"
+        read -rp "Reconfigure? [y/N]: " reconfigure
+        if [[ ! "$reconfigure" =~ ^[Yy]$ ]]; then
+            echo "Keeping existing configuration."
+            return 0
+        fi
+    fi
+
+    mkdir -p "$SHIA_CONFIG_DIR"
+
+    read -rp "API provider URL [https://openrouter.ai/api/v1]: " api_url
+    api_url="${api_url:-https://openrouter.ai/api/v1}"
+
+    read -rsp "API key: " api_key
+    echo
+    if [[ -z "$api_key" ]]; then
+        echo "Error: API key cannot be empty."
+        echo "Run 'shia init' later to configure."
+        return 1
+    fi
+
+    read -rp "Model ID (e.g. anthropic/claude-sonnet-4, openai/gpt-4o): " model
+    if [[ -z "$model" ]]; then
+        echo "Error: Model ID cannot be empty."
+        echo "Run 'shia init' later to configure."
+        return 1
+    fi
+
+    # Write config
+    cat > "${SHIA_CONFIG_DIR}/config" <<CONF
+# shia configuration
+SHIA_PROFILE=default
+CONF
+    chmod 600 "${SHIA_CONFIG_DIR}/config"
+
+    # Write profiles
+    local profiles_json
+    profiles_json=$(jq -n \
+        --arg url "$api_url" \
+        --arg key "$api_key" \
+        --arg model "$model" \
+        '{"default": {"api_url": $url, "api_key": $key, "model": $model}}')
+    echo "$profiles_json" > "${SHIA_CONFIG_DIR}/profiles"
+    chmod 600 "${SHIA_CONFIG_DIR}/profiles"
+
+    # Copy dangerous commands if not present
+    if [[ ! -f "${SHIA_CONFIG_DIR}/dangerous_commands" ]]; then
+        cp "${SOURCE_DIR}/defaults/dangerous_commands" "${SHIA_CONFIG_DIR}/dangerous_commands"
+    fi
+
+    # Create user system prompt if not present
+    if [[ ! -f "${SHIA_CONFIG_DIR}/system_prompt" ]]; then
+        cat > "${SHIA_CONFIG_DIR}/system_prompt" <<'PROMPT'
+# Custom instructions for shia (appended to base prompt)
+# Uncomment and edit lines below, or add your own.
+# Examples:
+#   Prefer eza over ls
+#   Use doas instead of sudo
+#   Always use long flags for readability
+PROMPT
+    fi
+
+    echo
+    echo -e "\033[32mConfiguration saved.\033[0m"
+    echo "Profile 'default' created with model: ${model}"
 }
 
-RC_FILE=$(detect_rc_file)
-PATH_LINE='export PATH="${HOME}/.local/bin:${PATH}"'
+if [[ -t 0 ]]; then
+    setup_provider || true
+else
+    echo
+    echo "Run 'shia init' to configure your API provider."
+fi
+
+# --- Final instructions ---
 
 echo
-echo "${INSTALL_DIR} is not in your PATH."
-
-if [[ -f "$RC_FILE" ]] && grep -Fq "$PATH_LINE" "$RC_FILE"; then
-    echo "PATH export already exists in ${RC_FILE}."
-    echo "Run 'source ${RC_FILE}' or restart your terminal, then run 'shia init'."
-    exit 0
-fi
-
-if [[ -t 0 ]]; then
-    read -rp "Add it to ${RC_FILE}? [Y/n]: " add_to_path
-    add_to_path="${add_to_path:-Y}"
+if [[ -n "$NEEDS_SOURCE" ]]; then
+    echo "Run 'source ${NEEDS_SOURCE}' or restart your terminal, then:"
+    echo "  shia \"list all running docker containers\""
 else
-    add_to_path="n"
-fi
-
-if [[ "$add_to_path" =~ ^[Yy]$ ]]; then
-    {
-        echo
-        echo "# Added by shia installer"
-        echo "$PATH_LINE"
-    } >> "$RC_FILE"
-    echo "Added to ${RC_FILE}"
-    echo
-    echo "Run 'source ${RC_FILE}' or restart your terminal, then:"
-    echo "  shia init"
-else
-    echo
-    echo "Add this to your shell config manually:"
-    echo '  export PATH="${HOME}/.local/bin:${PATH}"'
-    echo
-    echo "Then run 'shia init' to configure your API provider."
+    echo "shia is ready! Try:"
+    echo "  shia \"list all running docker containers\""
+    echo "  cat file.txt | shia \"explain this\""
 fi
