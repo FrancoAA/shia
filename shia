@@ -1,0 +1,126 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Resolve script directory for sourcing lib files
+SHIA_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Source library files
+source "${SHIA_DIR}/lib/utils.sh"
+source "${SHIA_DIR}/lib/config.sh"
+source "${SHIA_DIR}/lib/profiles.sh"
+source "${SHIA_DIR}/lib/prompt.sh"
+source "${SHIA_DIR}/lib/api.sh"
+source "${SHIA_DIR}/lib/executor.sh"
+source "${SHIA_DIR}/lib/tools.sh"
+source "${SHIA_DIR}/lib/plugins.sh"
+
+# Check dependencies
+check_dependencies jq curl
+
+# --- Meta commands ---
+
+if [[ "${1:-}" == "--version" ]]; then
+    echo "shia v${SHIA_VERSION}"
+    exit 0
+fi
+
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+    load_builtin_plugins
+    generate_help
+    exit 0
+fi
+
+# Load all plugins
+load_plugins
+
+# --- Pipe detection ---
+
+PIPED_INPUT=""
+if [[ ! -t 0 ]]; then
+    PIPED_INPUT=$(cat)
+fi
+
+# --- Flag parsing ---
+
+SHIA_DRY_RUN="${SHIA_DRY_RUN:-false}"
+SHIA_PRELOAD_SKILL="${SHIA_PRELOAD_SKILL:-}"
+
+parse_cli_flags "$@"
+
+export SHIA_DRY_RUN
+
+# --- CLI subcommand dispatch ---
+
+if [[ ${#PROMPT_ARGS[@]} -gt 0 ]]; then
+    local_cmd="${PROMPT_ARGS[0]}"
+    local_args=("${PROMPT_ARGS[@]:1}")
+    if dispatch_cli_command "$local_cmd" "${local_args[@]+"${local_args[@]}"}"; then
+        exit $?
+    fi
+fi
+
+# Join prompt arguments into a single string
+PROMPT="${PROMPT_ARGS[*]:-}"
+
+# --- Build user prompt with piped content ---
+
+if [[ -n "$PIPED_INPUT" && -n "$PROMPT" ]]; then
+    PROMPT="${PROMPT}
+
+The following is the content piped as input for context:
+${PIPED_INPUT}"
+elif [[ -n "$PIPED_INPUT" && -z "$PROMPT" ]]; then
+    # Piped input with no prompt — use input as the prompt
+    PROMPT="$PIPED_INPUT"
+fi
+
+# --- Validate we have something to do ---
+
+if [[ -z "$PROMPT" ]]; then
+    generate_help
+    exit 0
+fi
+
+# --- Execute ---
+
+load_config
+validate_config
+load_tools
+fire_hook "init"
+
+debug_log "mode" "single-shot"
+debug_log "prompt" "$PROMPT"
+[[ -n "$PIPED_INPUT" ]] && debug_log "pipe" "piped input included ($(echo "$PIPED_INPUT" | wc -c | tr -d ' ') bytes)"
+
+mode="single-prompt"
+[[ -n "$PIPED_INPUT" ]] && mode="pipe"
+
+system_prompt=$(build_system_prompt "$mode")
+
+# Clear loaded skill after prompt build (it's been injected)
+SHIA_LOADED_SKILL_CONTENT=""
+SHIA_LOADED_SKILL_NAME=""
+
+messages=$(build_single_messages "$system_prompt" "$PROMPT")
+tools=$(build_tools_array)
+
+spinner_start "Thinking..."
+response=$(api_chat_loop "$messages" "$tools")
+api_exit=$?
+spinner_stop
+
+if [[ $api_exit -ne 0 ]]; then
+    fire_hook "shutdown"
+    exit 1
+fi
+
+# Fire hooks for history logging
+fire_hook "user_message" "$PROMPT"
+[[ -n "$response" ]] && fire_hook "assistant_message" "$response"
+
+# Output raw response
+if [[ -n "$response" ]]; then
+    echo "$response"
+fi
+
+fire_hook "shutdown"
